@@ -1,5 +1,5 @@
 import { createApp } from 'vue'
-import App from './AppGraphviz.vue'
+import App from './AppI18n.vue'
 import './style.css'
 import './lr0-style.css'
 
