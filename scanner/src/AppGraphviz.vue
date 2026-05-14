@@ -110,7 +110,11 @@
         <div class="tabs"><div class="tab wide-tab"><span class="tab-dot"></span>grammar.lr0<span style="margin-left:auto;color:var(--muted)">×</span></div></div>
         <div class="toolbar lr0-toolbar">
           <button class="primary" @click="buildGrammar">▶ Build Automaton</button>
+          <select v-model="selectedGrammarSample" @change="applyGrammarSample">
+            <option v-for="sample in grammarSamples" :key="sample.id" :value="sample.id">{{ sample.name }}</option>
+          </select>
           <button @click="loadGrammarSample">Load Sample</button>
+          <button @click="downloadLR0Report">Export Report</button>
           <button @click="clearGrammar">Clear</button>
           <button @click="toggleTheme">{{ theme === 'dark' ? 'Light Mode' : 'Dark Mode' }}</button>
         </div>
@@ -149,12 +153,17 @@
 
                 <div class="section-card">
                   <div class="section-head"><h3>Conflict Check</h3><span>{{ lr0Result.summary }}</span></div>
-                  <div v-if="conflictList.length" class="conflict-list">
-                    <div v-for="conflict in conflictList" :key="conflict.stateId" class="conflict-row">
-                      <strong>I{{ conflict.stateId }}</strong>
-                      <span v-if="conflict.shiftReduce" class="conflict-pill sr">SR Conflict</span>
-                      <span v-if="conflict.reduceReduce" class="conflict-pill rr">RR Conflict</span>
-                      <span v-if="conflict.shiftSymbols.length">Shift on: {{ conflict.shiftSymbols.join(', ') }}</span>
+                  <div v-if="conflictExplanations.length" class="conflict-list">
+                    <div v-for="conflict in conflictExplanations" :key="conflict.stateId" class="conflict-row conflict-detail">
+                      <div class="conflict-title">
+                        <strong>I{{ conflict.stateId }}</strong>
+                        <span v-if="conflict.shiftReduce" class="conflict-pill sr">SR Conflict</span>
+                        <span v-if="conflict.reduceReduce" class="conflict-pill rr">RR Conflict</span>
+                        <span v-if="conflict.shiftSymbols.length">Shift on: {{ conflict.shiftSymbols.join(', ') }}</span>
+                      </div>
+                      <p>{{ conflict.reason }}</p>
+                      <div v-if="conflict.reduceItems.length" class="explain-block"><b>Reduce item(s)</b><code v-for="item in conflict.reduceItems" :key="item">{{ item }}</code></div>
+                      <div v-if="conflict.shiftItems.length" class="explain-block"><b>Shift item(s)</b><code v-for="item in conflict.shiftItems" :key="item">{{ item }}</code></div>
                     </div>
                   </div>
                   <div v-else class="ok-text">No shift-reduce or reduce-reduce conflict was found.</div>
@@ -221,10 +230,21 @@ import { SAMPLE_CODE, escapeHtml, scan, tokenClass } from './scanner.js'
 import { buildGraph, dfaPathForToken, makeDot } from './dfa.js'
 import { SAMPLE_GRAMMAR, buildLR0 } from './lr0.js'
 
+const grammarSamples = [
+  { id: 'expression', name: 'Expression grammar (SR conflict)', grammar: SAMPLE_GRAMMAR },
+  { id: 'simple-lr0', name: 'Simple LR(0) grammar', grammar: `S -> A
+A -> a A | b` },
+  { id: 'rr-conflict', name: 'Reduce-reduce conflict sample', grammar: `S -> A | B
+A -> a
+B -> a` },
+  { id: 'parentheses', name: 'Parentheses grammar', grammar: `S -> ( S ) S | epsilon` },
+]
+
 const viz = new Viz({ Module, render })
 const activeTool = ref('scanner')
 const activeLR0Panel = ref('overview')
 const showLR0Dot = ref(false)
+const selectedGrammarSample = ref('expression')
 const source = ref(SAMPLE_CODE)
 const tokens = ref([])
 const theme = ref('dark')
@@ -240,7 +260,6 @@ const highlightRef = ref(null)
 const lineNoRef = ref(null)
 const fileInputRef = ref(null)
 const dfaSvgRef = ref(null)
-const lr0GraphRef = ref(null)
 const lr0SvgMarkup = ref('')
 const graphvizError = ref('')
 
@@ -268,7 +287,9 @@ const svgViewBox = computed(() => `0 0 ${svgWidth.value} 160`)
 const dotText = computed(() => makeDot(graph.value))
 const lr0Result = computed(() => buildLR0(grammarSource.value))
 const conflictList = computed(() => lr0Result.value.conflicts.filter((c) => c.shiftReduce || c.reduceReduce))
+const conflictExplanations = computed(() => conflictList.value.map(makeConflictExplanation))
 const lr0DotText = computed(() => makeGraphvizDot(lr0Result.value, theme.value))
+const lr0ReportText = computed(() => makeLR0Report())
 
 function makeGraphvizDot(result, mode) {
   if (!result || result.errors?.length || !result.states?.length) return ''
@@ -309,6 +330,58 @@ function makeGraphvizDot(result, mode) {
   return lines.join('\n')
 }
 function escapeDot(value) { return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"') }
+
+function makeConflictExplanation(conflict) {
+  const state = lr0Result.value.states[conflict.stateId]
+  const shiftItems = []
+  for (const item of state.items) {
+    const production = lr0Result.value.productions[item.prod]
+    const next = production?.rhs?.[item.dot]
+    if (next && conflict.shiftSymbols.includes(next)) shiftItems.push(item.text)
+  }
+  const parts = []
+  if (conflict.shiftReduce) parts.push(`The state contains completed item(s), so a reduce action is possible. It also contains item(s) with the dot before terminal ${conflict.shiftSymbols.join(', ')}, so a shift action is possible on the same LR(0) state.`)
+  if (conflict.reduceReduce) parts.push('The state contains more than one completed item, so the parser cannot choose a unique reduce production without lookahead information.')
+  return { ...conflict, shiftItems, reason: parts.join(' ') }
+}
+
+function makeLR0Report() {
+  const result = lr0Result.value
+  if (result.errors.length) return `# LR(0) Analysis Report\n\nInput errors:\n${result.errors.map((e) => `- ${e}`).join('\n')}\n`
+  const lines = []
+  lines.push('# LR(0) Analysis Report', '')
+  lines.push('## Input Grammar', '```text', grammarSource.value.trim(), '```', '')
+  lines.push('## Summary', '')
+  lines.push(`- Productions: ${result.productions.length}`)
+  lines.push(`- States: ${result.states.length}`)
+  lines.push(`- Result: ${result.summary}`, '')
+  lines.push('## Augmented Grammar', '')
+  result.productions.forEach((p) => lines.push(`- (${p.index}) ${p.text}`))
+  lines.push('', '## Conflict Explanation', '')
+  if (!conflictExplanations.value.length) {
+    lines.push('No shift-reduce or reduce-reduce conflict was found.')
+  } else {
+    for (const c of conflictExplanations.value) {
+      lines.push(`### I${c.stateId}`)
+      if (c.shiftReduce) lines.push(`- Type: Shift-Reduce Conflict`)
+      if (c.reduceReduce) lines.push(`- Type: Reduce-Reduce Conflict`)
+      if (c.shiftSymbols.length) lines.push(`- Shift on: ${c.shiftSymbols.join(', ')}`)
+      lines.push(`- Reason: ${c.reason}`)
+      if (c.reduceItems.length) lines.push(`- Reduce item(s): ${c.reduceItems.join('; ')}`)
+      if (c.shiftItems.length) lines.push(`- Shift item(s): ${c.shiftItems.join('; ')}`)
+      lines.push('')
+    }
+  }
+  lines.push('## Item Sets', '')
+  result.states.forEach((state) => {
+    lines.push(`### I${state.id}`)
+    state.items.forEach((item) => lines.push(`- ${item.text}`))
+    lines.push('')
+  })
+  lines.push('## GOTO Transitions', '')
+  result.transitions.forEach((edge) => lines.push(`- GOTO(I${edge.from}, ${edge.symbol}) = I${edge.to}`))
+  return lines.join('\n')
+}
 
 async function renderLR0Graph() {
   if (!lr0DotText.value || activeTool.value !== 'lr0') return
@@ -354,11 +427,13 @@ function downloadTokens() { if (!tokens.value.length) runScanner(); downloadFile
 function downloadDot() { if (!dotText.value) return; downloadFile(dotText.value, 'dfa_graph.dot', 'text/vnd.graphviz;charset=utf-8'); statusText.value = 'dfa_graph.dot downloaded' }
 function downloadGraphSvg() { if (!dfaSvgRef.value || !selectedToken.value) return; const clone = dfaSvgRef.value.cloneNode(true); clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); clone.setAttribute('width', String(svgWidth.value)); clone.setAttribute('height', '160'); const content = `<?xml version="1.0" encoding="UTF-8"?>\n${new XMLSerializer().serializeToString(clone)}`; downloadFile(content, `dfa_${selectedToken.value.type}.svg`, 'image/svg+xml;charset=utf-8'); statusText.value = 'DFA SVG downloaded' }
 function buildGrammar() { const result = lr0Result.value; activeLR0Panel.value = 'graph'; renderLR0Graph(); statusText.value = result.errors.length ? 'Grammar input contains errors' : `Built ${result.states.length} states, ${result.transitions.length} transitions` }
-function loadGrammarSample() { grammarSource.value = SAMPLE_GRAMMAR; activeLR0Panel.value = 'overview'; buildGrammar() }
+function applyGrammarSample() { const sample = grammarSamples.find((item) => item.id === selectedGrammarSample.value); if (!sample) return; grammarSource.value = sample.grammar; activeLR0Panel.value = 'overview'; buildGrammar(); statusText.value = `Loaded: ${sample.name}` }
+function loadGrammarSample() { selectedGrammarSample.value = 'expression'; applyGrammarSample() }
 function clearGrammar() { grammarSource.value = ''; lr0SvgMarkup.value = ''; statusText.value = 'Grammar cleared' }
 function downloadLR0Dot() { if (!lr0DotText.value) return; downloadFile(lr0DotText.value, `lr0_graph_${theme.value}.dot`, 'text/vnd.graphviz;charset=utf-8'); statusText.value = 'LR(0) DOT downloaded' }
 function downloadLR0Svg() { if (!lr0SvgMarkup.value) return; downloadFile(lr0SvgMarkup.value, `lr0_graph_${theme.value}.svg`, 'image/svg+xml;charset=utf-8'); statusText.value = 'LR(0) SVG downloaded' }
 function downloadLR0Png() { if (!lr0SvgMarkup.value) return; const blob = new Blob([lr0SvgMarkup.value], { type: 'image/svg+xml;charset=utf-8' }); const url = URL.createObjectURL(blob); const image = new Image(); image.onload = () => { const scale = 2; const canvas = document.createElement('canvas'); canvas.width = image.width * scale; canvas.height = image.height * scale; const ctx = canvas.getContext('2d'); ctx.fillStyle = theme.value === 'dark' ? '#1e1e1e' : '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(scale, 0, 0, scale, 0, 0); ctx.drawImage(image, 0, 0); canvas.toBlob((pngBlob) => { if (pngBlob) downloadBlob(pngBlob, `lr0_graph_${theme.value}.png`); URL.revokeObjectURL(url); statusText.value = 'LR(0) PNG downloaded' }, 'image/png') }; image.onerror = () => { URL.revokeObjectURL(url); statusText.value = 'PNG export failed' }; image.src = url }
+function downloadLR0Report() { if (!lr0ReportText.value) return; downloadFile(lr0ReportText.value, 'lr0_analysis_report.md', 'text/markdown;charset=utf-8'); statusText.value = 'Analysis report downloaded' }
 function startResize(event) { resizeState.value = { startY: event.clientY, startHeight: bottomHeight.value }; document.body.classList.add('resizing'); window.addEventListener('mousemove', resizeBottom); window.addEventListener('mouseup', stopResize) }
 function resizeBottom(event) { if (!resizeState.value) return; const delta = resizeState.value.startY - event.clientY; const nextHeight = resizeState.value.startHeight + delta; const maxHeight = Math.max(260, window.innerHeight - 260); bottomHeight.value = Math.min(Math.max(nextHeight, 220), maxHeight) }
 function stopResize() { resizeState.value = null; document.body.classList.remove('resizing'); window.removeEventListener('mousemove', resizeBottom); window.removeEventListener('mouseup', stopResize) }
