@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lab5": "node scripts/lab56-cli.mjs --stage 5",
-    "lab6": "node scripts/lab56-cli.mjs --stage 6"
+    "lab5": "node scripts/lab5-cli.mjs",
+    "lab6": "node scripts/lab6-cli.mjs"
   },
   "dependencies": {
     "viz.js": "^2.1.2",
