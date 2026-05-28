@@ -1,6 +1,7 @@
 const KEYWORDS = new Map([
   ['int', 'INT'], ['float', 'FLOAT'], ['void', 'VOID'], ['if', 'IF'], ['else', 'ELSE'], ['while', 'WHILE'], ['return', 'RETURN'], ['input', 'INPUT'], ['print', 'PRINT'],
 ])
+
 const VALUE_TOKENS = new Set(['ID', 'NUM', 'FLO', 'RPAR', 'RBK', 'RBR'])
 const TYPE_TOKENS = new Set(['INT', 'FLOAT', 'VOID'])
 const PRECEDENCE = { '||': 1, '&&': 2, '<': 3, '<=': 3, '>': 3, '>=': 3, '==': 3, '!=': 3, '+': 4, '-': 4, '*': 5, '/': 5 }
@@ -13,19 +14,19 @@ function isIdChar(ch) { return /^[A-Za-z0-9]$/.test(ch || '') }
 function scanNumber(code, start, allowSign = false) {
   let i = start
   if (allowSign && '+-'.includes(code[i] || '')) i += 1
-  const intStart = i
+  const integerStart = i
   while (i < code.length && isDigit(code[i])) i += 1
-  const hasIntegerPart = i > intStart
+  const hasInteger = i > integerStart
   let hasDot = false
-  let hasFractionPart = false
+  let hasFraction = false
   if (code[i] === '.') {
     hasDot = true
     i += 1
-    const fracStart = i
+    const fractionStart = i
     while (i < code.length && isDigit(code[i])) i += 1
-    hasFractionPart = i > fracStart
+    hasFraction = i > fractionStart
   }
-  if (!hasIntegerPart && !(hasDot && hasFractionPart)) return null
+  if (!hasInteger && !(hasDot && hasFraction)) return null
   let hasExponent = false
   if ('eE'.includes(code[i] || '')) {
     const save = i
@@ -47,6 +48,7 @@ export function scanSource(code) {
     tokens.push({ type, lexeme, start, end, line: tokenLine })
     expectOperand = !VALUE_TOKENS.has(type)
   }
+
   while (i < code.length) {
     const ch = code[i]
     if (ch === '\n') { line += 1; i += 1; continue }
@@ -118,14 +120,14 @@ export function scanSource(code) {
   return tokens
 }
 
-function node(kind, label, children = [], type = '') {
+function astNode(kind, label, children = [], type = '') {
   return { id: ++nextAstId, kind, label, type, children: children.filter(Boolean) }
 }
 function commonType(left, right) {
   if (left === 'error' || right === 'error') return 'error'
   return left === 'float' || right === 'float' ? 'float' : 'int'
 }
-function error(kind, message, token = {}) {
+function makeError(kind, message, token = {}) {
   return { kind, message, line: token.line || 0, lexeme: token.lexeme || '' }
 }
 
@@ -149,7 +151,7 @@ class SymbolTable {
   declare(symbol, token) {
     const scope = this.current()
     if (scope.map.has(symbol.name)) {
-      this.errors.push(error('semantic', `重复声明：${symbol.name}`, token))
+      this.errors.push(makeError('semantic', `重复声明：${symbol.name}`, token))
       return scope.map.get(symbol.name)
     }
     const row = { ...symbol, scope: scope.id, level: scope.level, address: symbol.kind === 'function' ? '-' : `@${this.address++}`, extra: symbol.extra || '' }
@@ -171,7 +173,7 @@ class Parser {
   constructor(tokens) {
     this.tokens = tokens.filter((token) => token.type !== 'ERROR').concat({ type: '$', lexeme: '$', line: tokens.at(-1)?.line || 1 })
     this.index = 0
-    this.errors = tokens.filter((token) => token.type === 'ERROR').map((token) => error('lexical', `无法识别字符 ${token.lexeme}`, token))
+    this.errors = tokens.filter((token) => token.type === 'ERROR').map((token) => makeError('lexical', `无法识别字符 ${token.lexeme}`, token))
     this.symbolTable = new SymbolTable(this.errors)
     this.quads = []
     this.steps = []
@@ -179,7 +181,9 @@ class Parser {
     this.labelIndex = 0
     this.currentFunction = null
   }
+
   peek(offset = 0) { return this.tokens[this.index + offset] || this.tokens[this.tokens.length - 1] }
+  at(type) { return this.peek().type === type }
   shift(type, lexeme = null) {
     const token = this.peek()
     if (token.type === type && (lexeme === null || token.lexeme === lexeme)) {
@@ -192,7 +196,7 @@ class Parser {
   expect(type, message, lexeme = null) {
     const token = this.shift(type, lexeme)
     if (token) return token
-    this.errors.push(error('syntax', message || `期望 ${lexeme || type}`, this.peek()))
+    this.errors.push(makeError('syntax', message || `期望 ${lexeme || type}`, this.peek()))
     return { type, lexeme: lexeme || type, line: this.peek().line, synthetic: true }
   }
   emit(op, arg1 = '', arg2 = '', result = '') {
@@ -201,39 +205,82 @@ class Parser {
   }
   temp() { return `t${++this.tempIndex}` }
   label() { return `L${++this.labelIndex}` }
+
+  consumeUnsupported(context) {
+    const token = this.peek()
+    if (token.type === '$') return astNode('Error', 'EOF', [], 'error')
+    this.errors.push(makeError('syntax', `${context} 中遇到暂不支持或无法恢复的符号，已跳过`, token))
+    this.index += 1
+    return astNode('Error', token.lexeme, [], 'error')
+  }
+  skipUntil(stopTypes) {
+    const stops = new Set(stopTypes)
+    while (!stops.has(this.peek().type) && this.peek().type !== '$') this.index += 1
+  }
+
   parseProgram() {
     const children = []
-    while (this.peek().type !== '$') {
+    let guard = 0
+    while (!this.at('$')) {
       while (this.shift('SEMI')) {}
-      if (this.peek().type === '$') break
-      if (TYPE_TOKENS.has(this.peek().type) && this.peek(1).type === 'ID' && this.peek(2).type === 'LPAR') children.push(this.parseFunction())
-      else children.push(this.parseStatement())
+      if (this.at('$')) break
+      const start = this.index
+      const child = TYPE_TOKENS.has(this.peek().type) && this.peek(1).type === 'ID' && this.peek(2).type === 'LPAR'
+        ? this.parseFunction()
+        : this.parseStatement()
+      if (child) children.push(child)
+      if (this.index === start) children.push(this.consumeUnsupported('顶层程序'))
+      guard += 1
+      if (guard > this.tokens.length * 4 + 32) {
+        this.errors.push(makeError('syntax', '语法恢复超过安全上限，已停止继续分析', this.peek()))
+        break
+      }
     }
     this.steps.push({ action: 'accept', token: '$' })
-    return node('Program', 'Program', children)
+    return astNode('Program', 'Program', children)
   }
+
   parseType() {
     const token = this.peek()
-    if (!TYPE_TOKENS.has(token.type)) { this.errors.push(error('syntax', '需要类型 int/float/void', token)); return 'error' }
+    if (!TYPE_TOKENS.has(token.type)) {
+      this.errors.push(makeError('syntax', '需要类型 int/float/void', token))
+      if (!['RPAR', 'RBR', 'RBR', '$'].includes(token.type)) this.index += 1
+      return 'error'
+    }
     this.index += 1
     return token.lexeme
   }
+
   parseFunction() {
     const returnType = this.parseType()
     const id = this.expect('ID', '函数缺少名称')
     this.expect('LPAR', '函数缺少 (')
     const params = []
-    while (this.peek().type !== 'RPAR' && this.peek().type !== '$') {
+    let guard = 0
+    while (!this.at('RPAR') && !this.at('$')) {
+      const start = this.index
       const paramType = this.parseType()
       const paramId = this.expect('ID', '形参缺少名称')
       let isArray = false
-      if (this.shift('LBK')) { isArray = true; if (this.peek().type === 'NUM') this.index += 1; this.expect('RBK', '数组形参缺少 ]') }
+      while (this.shift('LBK')) {
+        isArray = true
+        if (this.at('NUM')) this.index += 1
+        this.expect('RBK', '数组形参缺少 ]')
+      }
       params.push({ name: paramId.lexeme, type: paramType, isArray, token: paramId })
-      if (this.peek().type === 'SEMI' || this.peek().type === 'CMA') this.index += 1
-      else if (this.peek().type !== 'RPAR') this.errors.push(error('syntax', '形参之间需要 ; 或 ,', this.peek()))
+      if (this.at('SEMI') || this.at('CMA')) this.index += 1
+      else if (!this.at('RPAR')) this.errors.push(makeError('syntax', '形参之间需要 ; 或 ,', this.peek()))
+      if (this.index === start) this.index += 1
+      if (++guard > this.tokens.length) { this.skipUntil(['RPAR']); break }
     }
     this.expect('RPAR', '函数缺少 )')
-    const functionSymbol = this.symbolTable.declare({ name: id.lexeme, kind: 'function', type: returnType, params, extra: `params=${params.map((param) => `${param.type}${param.isArray ? '[]' : ''} ${param.name}`).join(',')}` }, id)
+    const functionSymbol = this.symbolTable.declare({
+      name: id.lexeme,
+      kind: 'function',
+      type: returnType,
+      params,
+      extra: `params=${params.map((param) => `${param.type}${param.isArray ? '[]' : ''} ${param.name}`).join(',')}`,
+    }, id)
     this.currentFunction = functionSymbol
     this.emit('func', '', '', id.lexeme)
     this.symbolTable.enter(`fn:${id.lexeme}`)
@@ -243,21 +290,33 @@ class Parser {
     this.emit('end', '', '', id.lexeme)
     this.currentFunction = null
     this.shift('SEMI')
-    return node('FunctionDecl', `${returnType} ${id.lexeme}`, [node('ParamList', 'params', params.map((param) => node('Param', `${param.type}${param.isArray ? '[]' : ''} ${param.name}`, [], param.type))), body], returnType)
+    return astNode('FunctionDecl', `${returnType} ${id.lexeme}`, [
+      astNode('ParamList', 'params', params.map((param) => astNode('Param', `${param.type}${param.isArray ? '[]' : ''} ${param.name}`, [], param.type))),
+      body,
+    ], returnType)
   }
+
   parseBlock(reuseCurrentScope = false) {
     this.expect('LBR', '语句块缺少 {')
     if (!reuseCurrentScope) this.symbolTable.enter('block')
     const children = []
-    while (this.peek().type !== 'RBR' && this.peek().type !== '$') {
+    let guard = 0
+    while (!this.at('RBR') && !this.at('$')) {
+      const start = this.index
       const statement = this.parseStatement()
       if (statement) children.push(statement)
       while (this.shift('SEMI')) {}
+      if (this.index === start) children.push(this.consumeUnsupported('语句块'))
+      if (++guard > this.tokens.length * 3 + 16) {
+        this.errors.push(makeError('syntax', '语句块错误恢复超过安全上限，已跳出当前块', this.peek()))
+        break
+      }
     }
     this.expect('RBR', '语句块缺少 }')
     if (!reuseCurrentScope) this.symbolTable.leave()
-    return node('Block', 'Block', children)
+    return astNode('Block', 'Block', children)
   }
+
   parseStatement() {
     while (this.shift('SEMI')) {}
     if (TYPE_TOKENS.has(this.peek().type)) return this.parseDeclaration()
@@ -265,31 +324,58 @@ class Parser {
     if (this.shift('IF')) return this.parseIf()
     if (this.shift('WHILE')) return this.parseWhile()
     if (this.shift('PRINT')) return this.parsePrint()
-    if (this.peek().type === 'LBR') return this.parseBlock()
-    if (this.peek().type === 'RBR' || this.peek().type === '$') return null
+    if (this.shift('INPUT')) return this.parseInput()
+    if (this.at('LBR')) return this.parseBlock()
+    if (this.at('RBR') || this.at('$')) return null
     const expr = this.parseExpression()
-    return node('ExprStmt', 'ExprStmt', [expr.ast], expr.type)
+    return astNode('ExprStmt', 'ExprStmt', [expr.ast], expr.type)
   }
+
   parseDeclaration() {
     const varType = this.parseType()
     const id = this.expect('ID', '声明缺少变量名')
     let isArray = false
-    let size = ''
-    if (this.shift('LBK')) { isArray = true; if (this.peek().type === 'NUM') { size = this.peek().lexeme; this.index += 1 } this.expect('RBK', '数组声明缺少 ]') }
-    this.symbolTable.declare({ name: id.lexeme, kind: isArray ? 'array' : 'var', type: varType, extra: isArray ? `size=${size || '?'}` : '' }, id)
-    const children = [node('Identifier', id.lexeme, [], varType)]
-    if (this.shift('ASG')) { const expr = this.parseExpression(); children.push(expr.ast); this.checkAssignable(varType, expr.type, id); this.emit('=', expr.place, '', id.lexeme) }
-    return node('Declaration', `${varType}${isArray ? '[]' : ''} ${id.lexeme}`, children, varType)
+    const sizes = []
+    while (this.shift('LBK')) {
+      isArray = true
+      if (this.at('NUM')) { sizes.push(this.peek().lexeme); this.index += 1 }
+      this.expect('RBK', '数组声明缺少 ]')
+    }
+    this.symbolTable.declare({ name: id.lexeme, kind: isArray ? 'array' : 'var', type: varType, extra: isArray ? `size=${sizes.join('x') || '?'}` : '' }, id)
+    const children = [astNode('Identifier', id.lexeme, [], varType)]
+    if (this.shift('ASG')) {
+      const expr = this.at('LBR') ? this.parseInitializerList() : this.parseExpression()
+      children.push(expr.ast)
+      this.checkAssignable(varType, expr.type, id)
+      this.emit('=', expr.place, '', id.lexeme)
+    }
+    return astNode('Declaration', `${varType}${isArray ? '[]' : ''} ${id.lexeme}`, children, varType)
   }
+
+  parseInitializerList() {
+    const start = this.expect('LBR', '初始化列表缺少 {')
+    const items = []
+    while (!this.at('RBR') && !this.at('$')) {
+      if (this.shift('CMA')) continue
+      const before = this.index
+      items.push(this.parseExpression().ast)
+      if (this.at('CMA')) this.index += 1
+      if (this.index === before) this.index += 1
+    }
+    this.expect('RBR', '初始化列表缺少 }')
+    return { type: 'int', place: `{init@${start.line || 0}}`, ast: astNode('InitList', '{}', items, 'int') }
+  }
+
   parseReturn(token) {
     let expr = { type: 'void', place: '', ast: null }
     if (!['SEMI', 'RBR', '$'].includes(this.peek().type)) expr = this.parseExpression()
     const expected = this.currentFunction?.type || 'void'
-    if (expected === 'void' && expr.type !== 'void') this.errors.push(error('semantic', `void 函数不应返回 ${expr.type}`, token))
+    if (expected === 'void' && expr.type !== 'void') this.errors.push(makeError('semantic', `void 函数不应返回 ${expr.type}`, token))
     if (expected !== 'void') this.checkAssignable(expected, expr.type, token, 'return')
     this.emit('return', expr.place, '', this.currentFunction?.name || '')
-    return node('ReturnStmt', 'return', expr.ast ? [expr.ast] : [], expr.type)
+    return astNode('ReturnStmt', 'return', expr.ast ? [expr.ast] : [], expr.type)
   }
+
   parseIf() {
     this.expect('LPAR', 'if 缺少 (')
     const cond = this.parseExpression()
@@ -299,10 +385,15 @@ class Parser {
     this.emit('jz', cond.place, '', falseLabel)
     const thenNode = this.parseStatement()
     let elseNode = null
-    if (this.shift('ELSE')) { this.emit('jmp', '', '', endLabel); this.emit('label', '', '', falseLabel); elseNode = this.parseStatement(); this.emit('label', '', '', endLabel) }
-    else this.emit('label', '', '', falseLabel)
-    return node('IfStmt', 'if', [cond.ast, thenNode, elseNode])
+    if (this.shift('ELSE')) {
+      this.emit('jmp', '', '', endLabel)
+      this.emit('label', '', '', falseLabel)
+      elseNode = this.parseStatement()
+      this.emit('label', '', '', endLabel)
+    } else this.emit('label', '', '', falseLabel)
+    return astNode('IfStmt', 'if', [cond.ast, thenNode, elseNode])
   }
+
   parseWhile() {
     const startLabel = this.label()
     const endLabel = this.label()
@@ -314,15 +405,25 @@ class Parser {
     const body = this.parseStatement()
     this.emit('jmp', '', '', startLabel)
     this.emit('label', '', '', endLabel)
-    return node('WhileStmt', 'while', [cond.ast, body])
+    return astNode('WhileStmt', 'while', [cond.ast, body])
   }
+
   parsePrint() {
     let expr
     if (this.shift('LPAR')) { expr = this.parseExpression(); this.expect('RPAR', 'print 缺少 )') }
     else expr = this.parseExpression()
     this.emit('print', expr.place, '', '')
-    return node('PrintStmt', 'print', [expr.ast])
+    return astNode('PrintStmt', 'print', [expr.ast])
   }
+
+  parseInput() {
+    let expr = { ast: null, place: '' }
+    if (this.shift('LPAR')) { expr = this.parseExpression(); this.expect('RPAR', 'input 缺少 )') }
+    else expr = this.parseExpression()
+    this.emit('input', '', '', expr.place)
+    return astNode('InputStmt', 'input', [expr.ast])
+  }
+
   parseExpression(min = 0) {
     let left = this.parsePrimary()
     while (true) {
@@ -333,71 +434,84 @@ class Parser {
       const type = op.type === 'ROP' || op.lexeme === '&&' || op.lexeme === '||' ? 'int' : commonType(left.type, right.type)
       const temp = this.temp()
       this.emit(op.lexeme, left.place, right.place, temp)
-      left = { type, place: temp, ast: node('BinaryExpr', op.lexeme, [left.ast, right.ast], type) }
+      left = { type, place: temp, ast: astNode('BinaryExpr', op.lexeme, [left.ast, right.ast], type) }
     }
-    if (min === 0 && (this.peek().type === 'ASG' || this.peek().type === 'AAS')) {
+    if (min === 0 && (this.at('ASG') || this.at('AAS'))) {
       const op = this.peek()
       this.index += 1
-      const right = this.parseExpression()
-      if (!left.assignable) this.errors.push(error('semantic', '赋值左侧不是变量或数组元素', op))
+      const right = this.at('LBR') ? this.parseInitializerList() : this.parseExpression()
+      if (!left.assignable) this.errors.push(makeError('semantic', '赋值左侧不是变量或数组元素', op))
       this.checkAssignable(left.type, right.type, op)
       if (op.type === 'AAS') { const temp = this.temp(); this.emit('+', left.place, right.place, temp); this.emit('=', temp, '', left.place) }
       else this.emit('=', right.place, '', left.place)
-      left = { type: left.type, place: left.place, ast: node('AssignExpr', op.lexeme, [left.ast, right.ast], left.type) }
+      left = { type: left.type, place: left.place, ast: astNode('AssignExpr', op.lexeme, [left.ast, right.ast], left.type) }
     }
     return left
   }
+
   peekOperator() { return ['ADD', 'SUB', 'MUL', 'DIV', 'ROP', 'BOP'].includes(this.peek().type) ? this.peek() : null }
+
   parsePrimary() {
     const token = this.peek()
-    if (this.shift('NUM')) return { type: 'int', place: token.lexeme, ast: node('NumberLiteral', token.lexeme, [], 'int') }
-    if (this.shift('FLO')) return { type: 'float', place: token.lexeme, ast: node('FloatLiteral', token.lexeme, [], 'float') }
+    if (this.shift('NUM')) return { type: 'int', place: token.lexeme, ast: astNode('NumberLiteral', token.lexeme, [], 'int') }
+    if (this.shift('FLO')) return { type: 'float', place: token.lexeme, ast: astNode('FloatLiteral', token.lexeme, [], 'float') }
     if (this.shift('LPAR')) { const expr = this.parseExpression(); this.expect('RPAR', '表达式缺少 )'); return expr }
-    if (this.shift('SUB')) { const expr = this.parsePrimary(); const temp = this.temp(); this.emit('uminus', expr.place, '', temp); return { type: expr.type, place: temp, ast: node('UnaryExpr', '-', [expr.ast], expr.type) } }
+    if (this.shift('SUB')) { const expr = this.parsePrimary(); const temp = this.temp(); this.emit('uminus', expr.place, '', temp); return { type: expr.type, place: temp, ast: astNode('UnaryExpr', '-', [expr.ast], expr.type) } }
+    if (this.shift('BOP', '!')) { const expr = this.parsePrimary(); const temp = this.temp(); this.emit('!', expr.place, '', temp); return { type: 'int', place: temp, ast: astNode('UnaryExpr', '!', [expr.ast], 'int') } }
     if (this.shift('ID')) return this.parseIdentifierTail(token)
-    this.errors.push(error('syntax', `无法解析表达式 ${token.lexeme}`, token))
-    this.index += 1
-    return { type: 'error', place: '?', ast: node('Error', token.lexeme, [], 'error') }
+    this.errors.push(makeError('syntax', `无法解析表达式 ${token.lexeme}`, token))
+    if (token.type !== '$') this.index += 1
+    return { type: 'error', place: '?', ast: astNode('Error', token.lexeme, [], 'error') }
   }
+
   parseIdentifierTail(id) {
     if (this.shift('LPAR')) {
       const args = []
-      while (this.peek().type !== 'RPAR' && this.peek().type !== '$') {
+      let guard = 0
+      while (!this.at('RPAR') && !this.at('$')) {
         if (this.shift('CMA')) continue
+        const start = this.index
         args.push(this.parseExpression())
-        if (this.peek().type === 'CMA') this.index += 1
+        if (this.at('CMA')) this.index += 1
+        if (this.index === start) this.index += 1
+        if (++guard > this.tokens.length) { this.skipUntil(['RPAR']); break }
       }
       this.expect('RPAR', '函数调用缺少 )')
       const fn = this.symbolTable.global(id.lexeme)
-      if (!fn || fn.kind !== 'function') this.errors.push(error('semantic', `函数未声明：${id.lexeme}`, id))
+      if (!fn || fn.kind !== 'function') this.errors.push(makeError('semantic', `函数未声明：${id.lexeme}`, id))
       else {
         const params = fn.params || []
-        if (params.length !== args.length) this.errors.push(error('semantic', `函数 ${id.lexeme} 参数数量不匹配：需要 ${params.length}，实际 ${args.length}`, id))
+        if (params.length !== args.length) this.errors.push(makeError('semantic', `函数 ${id.lexeme} 参数数量不匹配：需要 ${params.length}，实际 ${args.length}`, id))
         for (let i = 0; i < Math.min(params.length, args.length); i += 1) this.checkAssignable(params[i].type, args[i].type, id, `arg${i + 1}`)
       }
       args.forEach((arg) => this.emit('arg', arg.place, '', ''))
       const type = fn?.type || 'error'
       const temp = type === 'void' ? '' : this.temp()
       this.emit('call', id.lexeme, String(args.length), temp)
-      return { type, place: temp || `${id.lexeme}()`, ast: node('CallExpr', `${id.lexeme}()`, args.map((arg) => arg.ast), type) }
+      return { type, place: temp || `${id.lexeme}()`, ast: astNode('CallExpr', `${id.lexeme}()`, args.map((arg) => arg.ast), type) }
     }
+
     const symbol = this.symbolTable.lookup(id.lexeme)
-    if (!symbol) this.errors.push(error('semantic', `未声明变量：${id.lexeme}`, id))
+    if (!symbol) this.errors.push(makeError('semantic', `未声明变量：${id.lexeme}`, id))
     const type = symbol?.type || 'error'
-    if (this.shift('LBK')) {
-      const index = this.peek().type === 'RBK' ? { type: 'int', place: '', ast: null } : this.parseExpression()
+    let place = id.lexeme
+    let ast = astNode('Identifier', id.lexeme, [], type)
+    while (this.shift('LBK')) {
+      const index = this.at('RBK') ? { type: 'int', place: '', ast: null } : this.parseExpression()
       this.expect('RBK', '数组访问缺少 ]')
-      if (symbol && !String(symbol.kind).includes('array')) this.errors.push(error('semantic', `${id.lexeme} 不是数组`, id))
+      if (symbol && !String(symbol.kind).includes('array')) this.errors.push(makeError('semantic', `${id.lexeme} 不是数组`, id))
       const temp = this.temp()
-      this.emit('[]', id.lexeme, index.place, temp)
-      return { type, place: temp, assignable: true, ast: node('ArrayAccess', `${id.lexeme}[]`, [index.ast], type) }
+      this.emit('[]', place, index.place, temp)
+      place = temp
+      ast = astNode('ArrayAccess', `${id.lexeme}[]`, [ast, index.ast], type)
     }
-    return { type, place: id.lexeme, assignable: true, ast: node('Identifier', id.lexeme, [], type) }
+    return { type, place, assignable: true, ast }
   }
+
   checkAssignable(expected, actual, token, where = 'assign') {
     if (expected === 'error' || actual === 'error' || expected === actual) return
     if (expected === 'float' && actual === 'int') return
-    this.errors.push(error('semantic', `类型不匹配：${where} 需要 ${expected}，实际 ${actual}`, token))
+    this.errors.push(makeError('semantic', `类型不匹配：${where} 需要 ${expected}，实际 ${actual}`, token))
   }
 }
 
