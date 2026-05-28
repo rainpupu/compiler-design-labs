@@ -59,10 +59,27 @@ function listSourceFiles(dir) {
   return result.sort((a, b) => a.localeCompare(b, 'zh-Hans-CN', { numeric: true }))
 }
 
+function runtimeErrorReport(file, err) {
+  return [
+    '实验六：中间代码生成',
+    '='.repeat(72),
+    `输入文件：${file}`,
+    '',
+    '【中间代码：四元式】',
+    '空',
+    '',
+    '【符号表】',
+    '空',
+    '',
+    '【错误报告】',
+    `1. [runtime] ${err?.stack || err?.message || String(err)}`,
+  ].join('\n')
+}
+
 function analyzeFile(file) {
   const source = fs.readFileSync(file, 'utf8')
   const result = analyzeSource(source)
-  return makeLab6TerminalReport(result, file)
+  return { report: makeLab6TerminalReport(result, file), errors: result.stats.errors, quads: result.stats.quads, crashed: false }
 }
 
 const args = process.argv.slice(2)
@@ -91,14 +108,18 @@ if (batchDirArg) {
   console.log(`实验六批量模式：共发现 ${files.length} 个源程序文件`)
   const summary = []
   for (const file of files) {
-    const source = fs.readFileSync(file, 'utf8')
-    const result = analyzeSource(source)
-    const report = makeLab6TerminalReport(result, file)
     const base = path.basename(file).replace(/\.[^.]+$/, '')
     const outputFile = path.join(outDir, `${base}.lab6.txt`)
-    fs.writeFileSync(outputFile, report, 'utf8')
-    summary.push({ file, outputFile, errors: result.stats.errors, quads: result.stats.quads })
-    console.log(`[OK] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  四元式:${result.stats.quads} 错误:${result.stats.errors}`)
+    try {
+      const item = analyzeFile(file)
+      fs.writeFileSync(outputFile, item.report, 'utf8')
+      summary.push({ file, outputFile, errors: item.errors, quads: item.quads, crashed: false })
+      console.log(`[OK] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  四元式:${item.quads} 错误:${item.errors}`)
+    } catch (err) {
+      fs.writeFileSync(outputFile, runtimeErrorReport(file, err), 'utf8')
+      summary.push({ file, outputFile, errors: 1, quads: 0, crashed: true })
+      console.log(`[ERR] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  运行时错误: ${err?.message || String(err)}`)
+    }
   }
   const summaryText = [
     '实验六批量分析汇总',
@@ -106,8 +127,9 @@ if (batchDirArg) {
     `输入目录：${batchDir}`,
     `输出目录：${outDir}`,
     `文件数量：${files.length}`,
+    `运行时异常文件数：${summary.filter((item) => item.crashed).length}`,
     '',
-    ...summary.map((item, index) => `${index + 1}. ${item.file}\n   输出：${item.outputFile}\n   四元式：${item.quads}，错误：${item.errors}`),
+    ...summary.map((item, index) => `${index + 1}. ${item.file}\n   输出：${item.outputFile}\n   四元式：${item.quads}，错误：${item.errors}${item.crashed ? '，状态：运行时异常' : ''}`),
   ].join('\n')
   fs.writeFileSync(path.join(outDir, 'summary.txt'), summaryText, 'utf8')
   console.log(`汇总文件：${path.relative(process.cwd(), path.join(outDir, 'summary.txt'))}`)
@@ -120,13 +142,18 @@ if (inputArg) {
     console.error(`找不到输入文件：${inputArg}`)
     process.exit(1)
   }
-  const report = analyzeFile(inputPath)
-  const out = getArg('--out', '-o')
-  if (out) {
-    fs.writeFileSync(path.resolve(process.cwd(), out), report, 'utf8')
-    console.log(`实验六分析结果已写入：${out}`)
-  } else {
-    console.log(report)
+  try {
+    const item = analyzeFile(inputPath)
+    const out = getArg('--out', '-o')
+    if (out) {
+      fs.writeFileSync(path.resolve(process.cwd(), out), item.report, 'utf8')
+      console.log(`实验六分析结果已写入：${out}`)
+    } else {
+      console.log(item.report)
+    }
+  } catch (err) {
+    console.error(runtimeErrorReport(inputPath, err))
+    process.exit(2)
   }
   process.exit(0)
 }
