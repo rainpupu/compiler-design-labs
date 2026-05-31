@@ -15,7 +15,7 @@ function usage() {
 
 可选：
   --grammar <文法文件>     使用自定义验收文法，默认使用内置主文法
-  --compact              批量输出时减少 LR(0)/SLR(1) 详细表规模
+  --compact              批量输出时减少 LR(0) 项目集规模
 
 示例：
   cd scanner
@@ -66,9 +66,6 @@ function normalizeForSlr(tokens) {
 function section(title, body = '') {
   return [`\n${title}`, '='.repeat(72), body].join('\n')
 }
-function subsection(title, body = '') {
-  return [`\n${title}`, '-'.repeat(72), body].join('\n')
-}
 function renderTokens(tokens) {
   return makeTable(['#', 'type', 'lexeme', 'line'], tokens.map((token, index) => [index, token.type, token.lexeme, token.line || '']))
 }
@@ -101,13 +98,13 @@ function renderLR0(lr0, compact = false) {
   if (compact && lr0.transitions.length > transitions.length) lines.push(`... 已省略 ${lr0.transitions.length - transitions.length} 条转移`)
   return lines.join('\n')
 }
-function renderSLR1(slr, compact = false) {
+function renderSLR1(slr) {
   if (slr.errors.length) return `SLR(1) 构造失败：\n${slr.errors.map((e) => `- ${e}`).join('\n')}`
   const lines = []
-  lines.push(`ACTION 列：${slr.actionColumns.join(', ')}`)
-  lines.push(`GOTO 列：${slr.gotoColumns.join(', ')}`)
+  lines.push(`ACTION 列数量：${slr.actionColumns.length}`)
+  lines.push(`GOTO 列数量：${slr.gotoColumns.length}`)
   lines.push(`SLR(1) 冲突数量：${slr.conflicts.length}`)
-  lines.push(`SLR(1) 分析结果：${slr.parseAccepted ? 'ACCEPT' : 'ERROR'}`)
+  lines.push(`SLR(1) 语法分析结果：${slr.parseAccepted ? 'ACCEPT' : 'ERROR'}`)
   if (slr.parseError) lines.push(`失败原因：${slr.parseError}`)
   lines.push('')
   if (slr.conflicts.length) {
@@ -118,15 +115,7 @@ function renderSLR1(slr, compact = false) {
   lines.push('FOLLOW 集：')
   slr.followSets.forEach((set) => lines.push(`FOLLOW(${set.symbol}) = { ${set.values.join(', ')} }`))
   lines.push('')
-  lines.push('ACTION/GOTO 表：')
-  const rows = compact ? slr.tableRows.slice(0, 18) : slr.tableRows
-  lines.push(makeTable(['state', ...slr.actionColumns.map((c) => `ACTION[${c}]`), ...slr.gotoColumns.map((c) => `GOTO[${c}]`)], rows.map((row) => [row.state, ...slr.actionColumns.map((c) => row.actions[c] || ''), ...slr.gotoColumns.map((c) => row.gotos[c] ?? '')])))
-  if (compact && slr.tableRows.length > rows.length) lines.push(`... 已省略 ${slr.tableRows.length - rows.length} 行分析表`)
-  lines.push('')
-  lines.push('SLR(1) 分析过程：')
-  const steps = compact ? slr.parseTrace.steps.slice(0, 40) : slr.parseTrace.steps
-  lines.push(makeTable(['#', '状态栈', '符号栈', '剩余输入', '动作', '说明'], steps.map((s) => [s.step, s.stateStack, s.symbolStack, s.input, s.action, s.note])))
-  if (compact && slr.parseTrace.steps.length > steps.length) lines.push(`... 已省略 ${slr.parseTrace.steps.length - steps.length} 步`)
+  lines.push('说明：按要求已省略 ACTION/GOTO 表和 SLR(1) 逐步分析过程，仅保留验收判断摘要、冲突信息和 FOLLOW 集。')
   return lines.join('\n')
 }
 function renderSemantic(result) {
@@ -169,7 +158,7 @@ function analyzeOne(file, grammarText, options = {}) {
   }
   lines.push(section('实验二：词法分析 Token 流', renderTokens(tokens)))
   lines.push(section('实验三：LR(0) 项目集规范族', renderLR0(lr0, options.compact)))
-  lines.push(section('实验四：SLR(1) 分析表与分析过程', renderSLR1(slr, options.compact)))
+  lines.push(section('实验四：SLR(1) 摘要', renderSLR1(slr)))
   lines.push(section('实验五：语义分析 AST / 符号表 / 错误报告', renderSemantic(semantic)))
   lines.push(section('实验六：中间代码生成（四元式）', renderIR(semantic)))
   return { report: lines.join('\n'), tokens, lr0, slr, semantic, verdict }
