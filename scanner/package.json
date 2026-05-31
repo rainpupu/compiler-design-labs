@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "lab5": "node scripts/lab5-cli.mjs",
-    "lab6": "node scripts/lab6-cli.mjs"
+    "lab6": "node scripts/lab6-cli.mjs",
+    "accept": "node scripts/acceptance-cli.mjs"
   },
   "dependencies": {
     "viz.js": "^2.1.2",
