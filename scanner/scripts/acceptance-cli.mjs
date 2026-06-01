@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { analyzeSource, astToText, makeTable, scanSource } from './lab-terminal-core.mjs'
 import { DEFAULT_ACCEPTANCE_GRAMMAR, buildLR0, buildSLR1 } from './lr-slr-core.mjs'
+import { allocateMemory, generateTargetCode, memoryStats } from './backend-core.mjs'
 
 function usage() {
-  console.log(`编译实验验收终端流水线：实验二到实验六
+  console.log(`编译实验验收终端流水线：实验二到实验八
 
 单文件模式：
   node scripts/acceptance-cli.mjs --input <源程序文件>
@@ -20,7 +21,7 @@ function usage() {
 示例：
   cd scanner
   npm run accept -- --input ../example/30.src
-  npm run accept -- --batch ../example --out-dir ../acceptance-output
+  npm run accept -- --batch ../example --out-dir ../acceptance-output --compact
 `)
 }
 
@@ -133,6 +134,31 @@ function renderSemantic(result) {
 function renderIR(result) {
   return makeTable(['#', 'op', 'arg1', 'arg2', 'result'], result.quads.map((q) => [q.index, q.op, q.arg1, q.arg2, q.result]))
 }
+function renderMemory(memory) {
+  const stats = memoryStats(memory)
+  const lines = []
+  lines.push(`内存区域基址：DATA=${memory.bases.data}，CODE=${memory.bases.code}，TEMP=${memory.bases.temp}，CONST=${memory.bases.const}`)
+  lines.push(`分配统计：数据对象 ${stats.dataCount}，临时变量 ${stats.tempCount}，常量 ${stats.constCount}，代码指令 ${stats.codeCount}，标签 ${stats.labelCount}`)
+  lines.push('')
+  lines.push('数据段 DATA：')
+  lines.push(makeTable(['name', 'kind', 'type', 'scope', 'size', 'address'], memory.symbols.map((s) => [s.name, s.kind, s.type, s.scope, s.size, s.address])))
+  lines.push('')
+  lines.push('临时区 TEMP：')
+  lines.push(makeTable(['name', 'size', 'address'], memory.temporaries.map((t) => [t.name, t.size, t.address])))
+  lines.push('')
+  lines.push('常量池 CONST：')
+  lines.push(makeTable(['literal', 'size', 'address'], memory.constants.map((c) => [c.literal, c.size, c.address])))
+  lines.push('')
+  lines.push('代码段 CODE：')
+  lines.push(makeTable(['quad#', 'op', 'address'], memory.code.map((c) => [c.index, c.op, c.address])))
+  lines.push('')
+  lines.push('标签地址：')
+  lines.push(makeTable(['label', 'address'], memory.labels.map((l) => [l.label, l.address])))
+  return lines.join('\n')
+}
+function renderTargetCode(targetLines) {
+  return targetLines.length ? targetLines.join('\n') : '空'
+}
 function resultVerdict(semantic, slr) {
   const reasons = []
   if (!slr.parseAccepted) reasons.push(`SLR(1) 语法分析未接受：${slr.parseError || '未知原因'}`)
@@ -146,9 +172,11 @@ function analyzeOne(file, grammarText, options = {}) {
   const lr0 = buildLR0(grammarText)
   const slr = buildSLR1(grammarText, tokenTypes)
   const semantic = analyzeSource(source)
+  const memory = allocateMemory(semantic)
+  const targetCode = generateTargetCode(semantic, memory)
   const verdict = resultVerdict(semantic, slr)
   const lines = []
-  lines.push('编译实验验收流水线：实验二到实验六')
+  lines.push('编译实验验收流水线：实验二到实验八')
   lines.push('='.repeat(72))
   lines.push(`输入文件：${file}`)
   lines.push(`最终判断：${verdict.ok ? '通过，无错误' : '不通过，存在错误'}`)
@@ -161,11 +189,13 @@ function analyzeOne(file, grammarText, options = {}) {
   lines.push(section('实验四：SLR(1) 摘要', renderSLR1(slr)))
   lines.push(section('实验五：语义分析 AST / 符号表 / 错误报告', renderSemantic(semantic)))
   lines.push(section('实验六：中间代码生成（四元式）', renderIR(semantic)))
-  return { report: lines.join('\n'), tokens, lr0, slr, semantic, verdict }
+  lines.push(section('实验七：内存地址分配 / 内存映像', renderMemory(memory)))
+  lines.push(section('实验八：目标代码生成', renderTargetCode(targetCode)))
+  return { report: lines.join('\n'), tokens, lr0, slr, semantic, memory, targetCode, verdict }
 }
 function runtimeReport(file, err) {
   return [
-    '编译实验验收流水线：实验二到实验六',
+    '编译实验验收流水线：实验二到实验八',
     '='.repeat(72),
     `输入文件：${file}`,
     '最终判断：不通过，工具运行时异常',
@@ -216,11 +246,11 @@ if (batchArg) {
     try {
       const item = analyzeOne(file, grammarText, { compact: true })
       fs.writeFileSync(outputFile, item.report, 'utf8')
-      summary.push({ file, outputFile, ok: item.verdict.ok, errors: item.verdict.reasons.length, tokens: item.tokens.length, quads: item.semantic.stats.quads })
-      console.log(`[${item.verdict.ok ? 'OK' : 'ERR'}] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  Token:${item.tokens.length} 四元式:${item.semantic.stats.quads} 原因数:${item.verdict.reasons.length}`)
+      summary.push({ file, outputFile, ok: item.verdict.ok, errors: item.verdict.reasons.length, tokens: item.tokens.length, quads: item.semantic.stats.quads, target: item.targetCode.length })
+      console.log(`[${item.verdict.ok ? 'OK' : 'ERR'}] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  Token:${item.tokens.length} 四元式:${item.semantic.stats.quads} 目标指令:${item.targetCode.length} 原因数:${item.verdict.reasons.length}`)
     } catch (err) {
       fs.writeFileSync(outputFile, runtimeReport(file, err), 'utf8')
-      summary.push({ file, outputFile, ok: false, errors: 1, tokens: 0, quads: 0, runtime: true })
+      summary.push({ file, outputFile, ok: false, errors: 1, tokens: 0, quads: 0, target: 0, runtime: true })
       console.log(`[CRASH] ${path.relative(process.cwd(), file)} -> ${path.relative(process.cwd(), outputFile)}  ${err?.message || String(err)}`)
     }
   }
@@ -233,7 +263,7 @@ if (batchArg) {
     `通过数量：${summary.filter((item) => item.ok).length}`,
     `不通过数量：${summary.filter((item) => !item.ok).length}`,
     '',
-    ...summary.map((item, index) => `${index + 1}. ${item.file}\n   输出：${item.outputFile}\n   判断：${item.ok ? '通过' : '不通过'}，Token：${item.tokens}，四元式：${item.quads}，原因数：${item.errors}${item.runtime ? '，运行时异常' : ''}`),
+    ...summary.map((item, index) => `${index + 1}. ${item.file}\n   输出：${item.outputFile}\n   判断：${item.ok ? '通过' : '不通过'}，Token：${item.tokens}，四元式：${item.quads}，目标指令：${item.target}，原因数：${item.errors}${item.runtime ? '，运行时异常' : ''}`),
   ].join('\n')
   fs.writeFileSync(path.join(outDir, 'summary.txt'), summaryText, 'utf8')
   console.log(`汇总文件：${path.relative(process.cwd(), path.join(outDir, 'summary.txt'))}`)
