@@ -7,9 +7,9 @@ import './lab56-style.css'
 import './pipeline-style.css'
 import { installSLR1Lab } from './lab4-patch.js'
 import { installLab56 } from './lab56-patch.js'
-import { installPipelineLab } from './pipeline-patch.js'
+import { installScannerSampleBridge } from './shared-source.js'
 
 createApp(App).mount('#app')
 installSLR1Lab()
 installLab56()
-installPipelineLab()
+installScannerSampleBridge()
